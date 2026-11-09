@@ -1,0 +1,1128 @@
+
+from io import BytesIO
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+from question_router import route_question
+from ai_engine import understand_question
+from data_analyzer import analyze_data
+from data_profiler import profile_dataset
+from insight_generator import generate_insights
+from visualization_engine import (
+    create_intelligent_chart,
+    create_dataset_visualization,
+)
+from export_utils import dataframe_to_excel_bytes, exportable_result_dataframe
+from followup_handler import is_followup_question, explain_previous_result
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def prepare_grouped_dataframe(values):
+    """
+    Convert grouped analysis output into a standard DataFrame.
+
+    Supports:
+    1. DataFrame output from the current analyzer.
+    2. Dictionary output from older analyzer versions.
+    3. List-like grouped results.
+    """
+
+    if isinstance(values, pd.DataFrame):
+        result_df = values.copy()
+
+    elif isinstance(values, dict):
+        result_df = pd.DataFrame(
+            list(values.items()),
+            columns=["Category", "Value"],
+        )
+
+    elif isinstance(values, (list, tuple)):
+        result_df = pd.DataFrame(values)
+
+    else:
+        return pd.DataFrame()
+
+    # Standardize column names when possible.
+    if len(result_df.columns) >= 2:
+        result_df = result_df.iloc[:, :2].copy()
+        result_df.columns = ["Category", "Value"]
+
+    return result_df.reset_index(drop=True)
+
+
+def is_percentage_question(question):
+    """
+    Identify questions asking for proportions or percentages.
+    """
+
+    keywords = [
+        "percentage",
+        "percent",
+        "proportion",
+        "share",
+        "composition",
+    ]
+
+    question_lower = question.lower()
+
+    return any(
+        keyword in question_lower
+        for keyword in keywords
+    )
+
+
+def add_percentage_column(result_df):
+    """
+    Calculate each category's percentage of the total.
+    """
+
+    result_df = result_df.copy()
+
+    result_df["Value"] = pd.to_numeric(
+        result_df["Value"],
+        errors="coerce",
+    )
+
+    total = result_df["Value"].sum()
+
+    if total != 0:
+        result_df["Percentage"] = (
+            result_df["Value"] / total * 100
+        )
+    else:
+        result_df["Percentage"] = 0.0
+
+    return result_df
+
+
+def format_grouped_dataframe(result_df, percentage_mode=False):
+    """
+    Format grouped results for presentation.
+    """
+
+    display_df = result_df.copy()
+
+    if "Value" in display_df.columns:
+        display_df["Value"] = display_df["Value"].map(
+            lambda value: (
+                f"{value:,.2f}"
+                if isinstance(value, (float, int))
+                and not float(value).is_integer()
+                else f"{value:,.0f}"
+                if isinstance(value, (float, int))
+                else value
+            )
+        )
+
+    if (
+        percentage_mode
+        and "Percentage" in display_df.columns
+    ):
+        display_df["Percentage"] = (
+            display_df["Percentage"].map(
+                lambda value: f"{value:.2f}%"
+            )
+        )
+
+    return display_df
+
+
+@st.cache_data(ttl=1800, max_entries=4, show_spinner=False)
+def get_excel_sheet_names(file_bytes):
+    """Read worksheet names once per uploaded workbook during a short cache window."""
+    with pd.ExcelFile(BytesIO(file_bytes)) as workbook:
+        return workbook.sheet_names
+
+
+@st.cache_data(ttl=1800, max_entries=4, show_spinner=False)
+def read_uploaded_dataset(file_bytes, filename, sheet_name=None):
+    """Cache file parsing so each chat rerun does not re-read the full upload."""
+    if str(filename).lower().endswith(".csv"):
+        return pd.read_csv(BytesIO(file_bytes))
+    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name)
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="AI Data Analyst",
+    page_icon="🤖",
+    layout="wide",
+)
+
+
+# ============================================================
+# APPLICATION TITLE
+# ============================================================
+
+st.title("🤖 AI Chat With Your Data")
+
+st.write(
+    "Upload a dataset and ask questions "
+    "in plain English."
+)
+
+
+# ============================================================
+# FILE UPLOAD
+# ============================================================
+
+uploaded_file = st.file_uploader(
+    "Upload your CSV or Excel file",
+    type=["csv", "xlsx"],
+)
+
+
+# ============================================================
+# DATASET PROCESSING
+# ============================================================
+
+if uploaded_file is not None:
+
+    try:
+
+        file_bytes = uploaded_file.getvalue()
+
+        if uploaded_file.name.lower().endswith(".csv"):
+            df = read_uploaded_dataset(
+                file_bytes,
+                uploaded_file.name,
+            )
+        else:
+            sheet_names = get_excel_sheet_names(file_bytes)
+
+            if not sheet_names:
+                raise ValueError("The Excel workbook does not contain any worksheets.")
+
+            if len(sheet_names) > 1:
+                selected_sheet = st.selectbox(
+                    "Choose an Excel worksheet",
+                    options=sheet_names,
+                    key=f"sheet_selector_{uploaded_file.name}",
+                    help="Select which worksheet to analyze.",
+                )
+            else:
+                selected_sheet = sheet_names[0]
+
+            df = read_uploaded_dataset(
+                file_bytes,
+                uploaded_file.name,
+                selected_sheet,
+            )
+
+    except Exception as e:
+
+        st.error(f"Unable to read the file: {e}")
+        st.stop()
+
+    if df.empty:
+
+        st.warning(
+            "The uploaded dataset is empty. "
+            "Please upload a file containing data."
+        )
+        st.stop()
+
+    # ========================================================
+    # DATASET PROFILING
+    # ========================================================
+
+    try:
+
+        profile = profile_dataset(df)
+
+        insights = generate_insights(
+            df,
+            profile,
+        )
+
+    except Exception as e:
+
+        st.error(
+            f"Unable to profile the dataset: {e}"
+        )
+        st.stop()
+
+    # ========================================================
+    # DATASET OVERVIEW
+    # ========================================================
+
+    st.subheader("📊 Dataset Overview")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("Rows", f"{profile['rows']:,}")
+
+    with col2:
+        st.metric("Columns", f"{profile['columns']:,}")
+
+    with col3:
+        st.metric(
+            "Missing Values",
+            f"{profile['total_missing']:,}",
+        )
+
+    with col4:
+        st.metric(
+            "Duplicate Rows",
+            f"{profile['duplicate_rows']:,}",
+        )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Numeric Columns",
+            f"{len(profile['numeric_columns']):,}",
+        )
+
+    with col2:
+        st.metric(
+            "Categorical Columns",
+            f"{len(profile['categorical_columns']):,}",
+        )
+
+    with col3:
+        st.metric(
+            "Date/Time Columns",
+            f"{len(profile['datetime_columns']):,}",
+        )
+
+    # ========================================================
+    # DATASET HEALTH
+    # ========================================================
+
+    st.subheader("🩺 Dataset Health")
+
+    total_issues = 0
+
+    if profile["total_missing"] > 0:
+        total_issues += 1
+
+    if profile["duplicate_rows"] > 0:
+        total_issues += 1
+
+    if profile["constant_columns"]:
+        total_issues += 1
+
+    if profile["high_cardinality_columns"]:
+        total_issues += 1
+
+    if total_issues == 0:
+
+        st.success(
+            "Dataset health looks good. "
+            "No major data-quality issues were detected."
+        )
+
+    else:
+
+        st.warning(
+            f"{total_issues} potential data-quality "
+            "issue(s) detected. Review the sections below."
+        )
+
+    # ========================================================
+    # QUALITY SUMMARY CARDS
+    # ========================================================
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+
+        if profile["total_missing"] == 0:
+            st.success("Missing Data\n\nNone detected")
+        else:
+            st.warning(
+                f"Missing Data\n\n"
+                f"{profile['total_missing']:,} values"
+            )
+
+    with col2:
+
+        if profile["duplicate_rows"] == 0:
+            st.success("Duplicates\n\nNone detected")
+        else:
+            st.warning(
+                f"Duplicates\n\n"
+                f"{profile['duplicate_rows']:,} rows"
+            )
+
+    with col3:
+
+        if profile["constant_columns"]:
+            st.warning(
+                "Constant Columns\n\n"
+                f"{len(profile['constant_columns'])}"
+            )
+        else:
+            st.success("Constant Columns\n\nNone")
+
+    with col4:
+
+        if profile["high_cardinality_columns"]:
+            st.info(
+                "High Cardinality\n\n"
+                f"{len(profile['high_cardinality_columns'])}"
+            )
+        else:
+            st.success("High Cardinality\n\nNone")
+
+    # ========================================================
+    # AUTOMATIC DATASET INSIGHTS
+    # ========================================================
+
+    st.subheader("💡 Automatic Dataset Insights")
+
+    if insights:
+
+        for insight in insights:
+            st.info(f"💡 {insight}")
+
+    else:
+
+        st.info(
+            "No automatic insights were generated."
+        )
+
+    # ========================================================
+    # DATA-AWARE QUESTION SUGGESTIONS
+    # ========================================================
+
+    with st.expander("💬 Suggested questions for this dataset", expanded=False):
+        suggested_questions = [
+            "How many records are there?",
+            "Show the average of every numeric column",
+            "Show missing values by column",
+        ]
+        numeric_columns_for_prompts = profile.get("usable_numeric_columns", profile.get("numeric_columns", []))
+        categorical_columns_for_prompts = profile.get("usable_group_columns", profile.get("categorical_columns", []))
+
+        if numeric_columns_for_prompts:
+            first_numeric = str(numeric_columns_for_prompts[0])
+            suggested_questions.append(
+                f"What is the average of {first_numeric}?"
+            )
+            suggested_questions.append(
+                f"Show the distribution of {first_numeric}"
+            )
+
+        if categorical_columns_for_prompts:
+            first_category = str(categorical_columns_for_prompts[0])
+            suggested_questions.append(
+                f"Show record count by {first_category}"
+            )
+
+        if numeric_columns_for_prompts and categorical_columns_for_prompts:
+            suggested_questions.append(
+                f"Show average {numeric_columns_for_prompts[0]} by {categorical_columns_for_prompts[0]}"
+            )
+
+        st.write(
+            "Copy a question below into the chat. Suggestions use columns "
+            "detected in the uploaded dataset; model support can vary by question."
+        )
+        for suggested_question in dict.fromkeys(suggested_questions):
+            st.code(suggested_question, language=None)
+
+    # ========================================================
+    # MISSING VALUE ANALYSIS
+    # ========================================================
+
+    if profile["missing_columns"]:
+
+        st.subheader("⚠️ Missing Value Analysis")
+
+        missing_df = pd.DataFrame(
+            [
+                {
+                    "Column": column,
+                    "Missing Values": details["count"],
+                    "Missing %": details["percentage"],
+                }
+                for column, details
+                in profile["missing_columns"].items()
+            ]
+        )
+
+        st.dataframe(
+            missing_df,
+            use_container_width=True,
+        )
+
+        chart = px.bar(
+            missing_df,
+            x="Column",
+            y="Missing Values",
+            text="Missing Values",
+            title="Missing Values by Column",
+        )
+
+        chart.update_traces(
+            textposition="outside"
+        )
+
+        chart.update_layout(
+            xaxis_title="Column",
+            yaxis_title="Missing Values",
+        )
+
+        st.plotly_chart(
+            chart,
+            use_container_width=True,
+            key="missing_values_chart",
+        )
+
+    else:
+
+        with st.expander(
+            "⚠️ Missing Value Analysis",
+            expanded=False,
+        ):
+
+            st.success(
+                "No missing values were detected "
+                "in the dataset."
+            )
+
+    # ========================================================
+    # DUPLICATE ANALYSIS
+    # ========================================================
+
+    with st.expander(
+        "🔍 Duplicate Analysis",
+        expanded=False,
+    ):
+
+        if profile["duplicate_rows"] > 0:
+
+            st.warning(
+                f"{profile['duplicate_rows']:,} "
+                "duplicate row(s) detected."
+            )
+
+        else:
+
+            st.success(
+                "No duplicate rows detected."
+            )
+
+    # ========================================================
+    # CONSTANT COLUMN ANALYSIS
+    # ========================================================
+
+    with st.expander(
+        "📌 Constant Column Analysis",
+        expanded=False,
+    ):
+
+        if profile["constant_columns"]:
+
+            st.warning(
+                "The following columns contain "
+                "only one unique value:"
+            )
+
+            st.write(profile["constant_columns"])
+
+        else:
+
+            st.success(
+                "No constant columns detected."
+            )
+
+    # ========================================================
+    # HIGH CARDINALITY ANALYSIS
+    # ========================================================
+
+    with st.expander(
+        "🧬 High Cardinality Analysis",
+        expanded=False,
+    ):
+
+        if profile["high_cardinality_columns"]:
+
+            st.info(
+                "The following columns have a "
+                "very high percentage of unique values:"
+            )
+
+            st.write(
+                profile["high_cardinality_columns"]
+            )
+
+            st.caption(
+                "High cardinality is not necessarily "
+                "an error. Identifier columns often "
+                "have high cardinality."
+            )
+
+        else:
+
+            st.success(
+                "No high-cardinality columns detected."
+            )
+
+    # ========================================================
+    # LOW-CARDINALITY NUMERIC COLUMNS
+    # ========================================================
+
+    with st.expander(
+        "🔢 Low-Cardinality Numeric Columns",
+        expanded=False,
+    ):
+
+        if profile["low_cardinality_numeric"]:
+
+            st.info(
+                "These numeric columns contain "
+                "relatively few unique values:"
+            )
+
+            st.write(
+                profile["low_cardinality_numeric"]
+            )
+
+            st.caption(
+                "These columns may represent "
+                "categories, flags, scores, or codes."
+            )
+
+        else:
+
+            st.success(
+                "No low-cardinality numeric "
+                "columns detected."
+            )
+
+    # ========================================================
+    # DATASET PREVIEW
+    # ========================================================
+
+    with st.expander(
+        "🔍 Preview Dataset",
+        expanded=False,
+    ):
+
+        st.dataframe(
+            df.head(10),
+            use_container_width=True,
+        )
+
+        dataset_csv = df.to_csv(index=False).encode("utf-8")
+        dataset_excel = dataframe_to_excel_bytes(df, "Dataset")
+        download_col1, download_col2 = st.columns(2)
+        with download_col1:
+            st.download_button(
+                "Download full dataset (CSV)",
+                data=dataset_csv,
+                file_name="dataset_export.csv",
+                mime="text/csv",
+                key=f"download_dataset_csv_{uploaded_file.name}",
+            )
+        with download_col2:
+            st.download_button(
+                "Download full dataset (Excel)",
+                data=dataset_excel,
+                file_name="dataset_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"download_dataset_xlsx_{uploaded_file.name}",
+            )
+
+    # ========================================================
+    # COLUMN INFORMATION
+    # ========================================================
+
+    with st.expander(
+        "📋 Column Information",
+        expanded=False,
+    ):
+
+        st.dataframe(
+            profile["column_details"],
+            use_container_width=True,
+        )
+
+    # ========================================================
+    # NUMERIC STATISTICS
+    # ========================================================
+
+    with st.expander(
+        "📈 Numeric Statistics",
+        expanded=False,
+    ):
+
+        if not profile["numeric_summary"].empty:
+
+            st.dataframe(
+                profile["numeric_summary"],
+                use_container_width=True,
+            )
+
+        else:
+
+            st.info(
+                "No numeric columns were detected."
+            )
+
+    # ========================================================
+    # CHAT HISTORY INITIALIZATION
+    # ========================================================
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # ========================================================
+    # ASK YOUR DATASET
+    # ========================================================
+
+    st.subheader("💬 Ask Your Dataset")
+
+    question = st.chat_input(
+        "Ask a question, e.g. Show record count by category"
+    )
+
+    # ========================================================
+    # QUESTION PROCESSING
+    # ========================================================
+
+    if question:
+
+        st.session_state.chat_history.append(
+            {
+                "role": "user",
+                "content": question,
+            }
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # HANDLE CONTEXTUAL FOLLOW-UP OR NEW ANALYSIS
+            # ------------------------------------------------
+
+            previous_result = st.session_state.get("last_analysis_result")
+            is_contextual_followup = (
+                is_followup_question(question)
+                and isinstance(previous_result, dict)
+                and previous_result.get("success")
+            )
+
+            if is_contextual_followup:
+                result = {
+                    "success": True,
+                    "result_type": "followup",
+                    "answer": explain_previous_result(
+                        question,
+                        st.session_state.get("last_analysis_question"),
+                        previous_result,
+                        df,
+                    ),
+                }
+                answer = result["answer"]
+            else:
+                # ------------------------------------------------
+                # ROUTE QUESTION
+                # ------------------------------------------------
+
+                route = route_question(question)
+
+                # ------------------------------------------------
+                # UNDERSTAND QUESTION
+                # ------------------------------------------------
+
+                if route["route"] == "direct":
+                    request = {"intent": route["intent"]}
+                else:
+                    request = understand_question(question, df)
+
+                # ------------------------------------------------
+                # ANALYZE DATA
+                # ------------------------------------------------
+
+                result = analyze_data(df, request)
+
+                # ------------------------------------------------
+                # GENERATE ANSWER
+                # ------------------------------------------------
+
+                if result.get("success"):
+                    answer = result.get("answer", "Analysis completed.")
+                else:
+                    # Preserve intentional clarification guidance.
+                    semantic_warning = request.get("semantic_warning")
+                    if request.get("intent") == "unknown" and semantic_warning:
+                        answer = semantic_warning
+                    else:
+                        answer = result.get(
+                            "answer",
+                            "Unable to analyze the question.",
+                        )
+
+                if result.get("success"):
+                    st.session_state.last_analysis_result = result
+                    st.session_state.last_analysis_question = question
+
+        except Exception as e:
+
+            result = {
+                "success": False,
+                "result_type": "error",
+                "answer": (
+                    "An error occurred while processing "
+                    f"your question: {e}"
+                ),
+            }
+
+            answer = result["answer"]
+
+        # ----------------------------------------------------
+        # SAVE AI RESPONSE
+        # ----------------------------------------------------
+
+        st.session_state.chat_history.append(
+            {
+                "role": "assistant",
+                "content": answer,
+            }
+        )
+
+        # ====================================================
+        # AI ANSWER
+        # ====================================================
+
+        st.markdown("### 🤖 AI Answer")
+        st.markdown(answer)
+
+        # ====================================================
+        # NUMBER RESULT
+        # ====================================================
+
+        if (
+            result.get("success")
+            and result.get("result_type") == "table"
+        ):
+
+            table_df = result.get("value")
+
+            if isinstance(table_df, pd.DataFrame) and not table_df.empty:
+                st.subheader("📋 Average of Numeric Columns")
+                st.dataframe(
+                    table_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info("The analysis completed, but no table was returned.")
+
+        elif (
+            result.get("success")
+            and result.get("result_type") == "number"
+        ):
+
+            value = result["value"]
+
+            if isinstance(value, (int, float)):
+
+                display_value = (
+                    f"{value:,.2f}"
+                    if isinstance(value, float)
+                    and not value.is_integer()
+                    else f"{value:,.0f}"
+                )
+
+            else:
+
+                display_value = str(value)
+
+            st.metric(
+                "Result",
+                display_value,
+            )
+
+        # ====================================================
+        # PERCENTAGE RESULT
+        # ====================================================
+
+        elif (
+            result.get("success")
+            and result.get("result_type") == "percentage"
+        ):
+
+            st.metric(
+                "Percentage",
+                f"{result['value']:.2f}%",
+            )
+
+        # ====================================================
+        # GROUPED RESULT
+        # ====================================================
+
+        elif (
+            result.get("success")
+            and result.get("result_type") == "dictionary"
+        ):
+
+            result_df = prepare_grouped_dataframe(
+                result.get("value")
+            )
+
+            if result_df.empty:
+
+                st.info(
+                    "The analysis completed, but no "
+                    "grouped results were available."
+                )
+
+            else:
+
+                percentage_mode = is_percentage_question(
+                    question
+                )
+
+                # --------------------------------------------
+                # CALCULATE PERCENTAGES WHEN REQUESTED
+                # --------------------------------------------
+
+                if percentage_mode:
+
+                    result_df = add_percentage_column(
+                        result_df
+                    )
+
+                    st.info(
+                        "Percentages are calculated using "
+                        "the total of the displayed groups."
+                    )
+
+                # --------------------------------------------
+                # DETAILED RESULTS
+                # --------------------------------------------
+
+                st.subheader("📋 Detailed Results")
+
+                display_df = format_grouped_dataframe(
+                    result_df,
+                    percentage_mode,
+                )
+
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # --------------------------------------------
+                # VISUALIZATION
+                # --------------------------------------------
+
+                st.subheader("📈 Visualization")
+
+                chart, chart_type = (
+                    create_intelligent_chart(
+                        result_df,
+                        question,
+                    )
+                )
+
+                if chart is not None:
+
+                    st.caption(
+                        "Automatically selected chart: "
+                        f"**{chart_type.capitalize()} Chart**"
+                    )
+
+                    chart_key = (
+                        f"analysis_chart_"
+                        f"{len(st.session_state.chat_history)}_"
+                        f"{chart_type}"
+                    )
+
+                    st.plotly_chart(
+                        chart,
+                        use_container_width=True,
+                        key=chart_key,
+                    )
+
+                else:
+
+                    st.info(
+                        "No suitable visualization "
+                        "could be generated for this result."
+                    )
+
+                # --------------------------------------------
+                # HIGHEST GROUP
+                # --------------------------------------------
+
+                if result.get("highest_group") is not None:
+
+                    highest_group = result[
+                        "highest_group"
+                    ]
+
+                    highest_value = result[
+                        "highest_value"
+                    ]
+
+                    st.info(
+                        f"📌 Highest: "
+                        f"**{highest_group}** "
+                        f"({highest_value:.2f}%)"
+                    )
+
+        # ====================================================
+        # DISTRIBUTION RESULT
+        # ====================================================
+
+        elif (
+            result.get("success")
+            and result.get("result_type") == "distribution"
+        ):
+
+            st.subheader("📈 Visualization")
+
+            chart, chart_type = (
+                create_dataset_visualization(
+                    df,
+                    result,
+                    question,
+                )
+            )
+
+            if chart is not None:
+
+                st.caption(
+                    "Automatically selected chart: "
+                    f"**{chart_type.capitalize()} Chart**"
+                )
+
+                chart_key = (
+                    f"dataset_chart_"
+                    f"{len(st.session_state.chat_history)}_"
+                    f"{chart_type}"
+                )
+
+                st.plotly_chart(
+                    chart,
+                    use_container_width=True,
+                    key=chart_key,
+                )
+
+            else:
+
+                st.info(
+                    "No suitable visualization "
+                    "could be generated."
+                )
+
+        # ====================================================
+        # RELATIONSHIP RESULT
+        # ====================================================
+
+        elif (
+            result.get("success")
+            and result.get("result_type") == "relationship"
+        ):
+
+            st.subheader("📈 Visualization")
+
+            chart, chart_type = (
+                create_dataset_visualization(
+                    df,
+                    result,
+                    question,
+                )
+            )
+
+            if chart is not None:
+
+                st.caption(
+                    "Automatically selected chart: "
+                    f"**{chart_type.capitalize()} Chart**"
+                )
+
+                chart_key = (
+                    f"dataset_chart_"
+                    f"{len(st.session_state.chat_history)}_"
+                    f"{chart_type}"
+                )
+
+                st.plotly_chart(
+                    chart,
+                    use_container_width=True,
+                    key=chart_key,
+                )
+
+            else:
+
+                st.info(
+                    "No suitable visualization "
+                    "could be generated."
+                )
+
+        # ====================================================
+        # EXPORT CURRENT ANALYSIS RESULT
+        # ====================================================
+
+        export_df = exportable_result_dataframe(result)
+        if export_df is not None:
+            st.subheader("⬇️ Export Analysis Result")
+            export_csv = export_df.to_csv(index=False).encode("utf-8")
+            export_xlsx = dataframe_to_excel_bytes(export_df, "Analysis")
+            export_col1, export_col2 = st.columns(2)
+            export_key = len(st.session_state.chat_history)
+            with export_col1:
+                st.download_button(
+                    "Download result (CSV)",
+                    data=export_csv,
+                    file_name="analysis_result.csv",
+                    mime="text/csv",
+                    key=f"download_result_csv_{export_key}",
+                )
+            with export_col2:
+                st.download_button(
+                    "Download result (Excel)",
+                    data=export_xlsx,
+                    file_name="analysis_result.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_result_xlsx_{export_key}",
+                )
+
+    # ========================================================
+    # CONVERSATION HISTORY
+    # ========================================================
+
+    if st.session_state.chat_history:
+
+        st.divider()
+
+        st.subheader("🕘 Conversation History")
+
+        for message in st.session_state.chat_history:
+
+            if message["role"] == "user":
+
+                st.markdown(
+                    f"**👤 You:** {message['content']}"
+                )
+
+            else:
+
+                st.markdown(
+                    f"**🤖 AI:** {message['content']}"
+                )
+
+else:
+
+    st.info(
+        "Upload a CSV or Excel dataset to get started."
+    )
