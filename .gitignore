@@ -25,3 +25,8 @@ Thumbs.db
 # Local validation datasets (not cleared for redistribution)
 HR-Employee-Attrition.csv
 customer_shopping_behavior.csv
+
+# Local data and tool output (never commit datasets)
+*.csv
+*.xlsx
+Claude outputs/

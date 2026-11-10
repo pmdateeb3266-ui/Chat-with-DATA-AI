@@ -455,7 +455,7 @@ if uploaded_file is not None:
 
         st.dataframe(
             missing_df,
-            use_container_width=True,
+            width="stretch",
         )
 
         chart = px.bar(
@@ -477,7 +477,7 @@ if uploaded_file is not None:
 
         st.plotly_chart(
             chart,
-            use_container_width=True,
+            width="stretch",
             key="missing_values_chart",
         )
 
@@ -614,7 +614,7 @@ if uploaded_file is not None:
 
         st.dataframe(
             df.head(10),
-            use_container_width=True,
+            width="stretch",
         )
 
         dataset_csv = df.to_csv(index=False).encode("utf-8")
@@ -648,7 +648,7 @@ if uploaded_file is not None:
 
         st.dataframe(
             profile["column_details"],
-            use_container_width=True,
+            width="stretch",
         )
 
     # ========================================================
@@ -664,7 +664,7 @@ if uploaded_file is not None:
 
             st.dataframe(
                 profile["numeric_summary"],
-                use_container_width=True,
+                width="stretch",
             )
 
         else:
@@ -916,7 +916,7 @@ if uploaded_file is not None:
 
                 st.dataframe(
                     display_df,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -948,7 +948,7 @@ if uploaded_file is not None:
 
                     st.plotly_chart(
                         chart,
-                        use_container_width=True,
+                        width="stretch",
                         key=chart_key,
                     )
 
@@ -1013,7 +1013,7 @@ if uploaded_file is not None:
 
                 st.plotly_chart(
                     chart,
-                    use_container_width=True,
+                    width="stretch",
                     key=chart_key,
                 )
 
@@ -1058,7 +1058,7 @@ if uploaded_file is not None:
 
                 st.plotly_chart(
                     chart,
-                    use_container_width=True,
+                    width="stretch",
                     key=chart_key,
                 )
 

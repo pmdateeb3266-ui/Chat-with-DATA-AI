@@ -1,8 +1,38 @@
 # AI Chat With Your Data
 
-An AI-powered Streamlit application that lets users explore structured datasets using natural-language questions. The AI interprets the question, while Pandas performs deterministic calculations on the uploaded data.
+Ask questions about any CSV or Excel file in plain English. The LLM only works out **what** you are asking; Pandas computes **every number** deterministically, so answers are reproducible and never hallucinated.
 
-The project is designed to support varied datasets and column names instead of relying on fixed HR or customer-specific schemas.
+**[▶ Live demo](https://chat-with-data-ai-5g4t3ttmslcfefpwzv7dex.streamlit.app/)** · Runs locally with Ollama or in the cloud with Groq
+
+![Answer table for "Show count by protocol_type"](docs/demo-answer.png)
+![Bar chart generated automatically for the same question](docs/demo-chart.png)
+
+*Example: "Show count by protocol_type" on the NSL-KDD network-traffic test set (22,544 records).*
+
+## How It Works
+
+```mermaid
+flowchart LR
+    Q[Question in plain English] --> R{Router}
+    R -- structural question --> A
+    R -- needs interpretation --> L[LLM: Ollama / Groq]
+    L --> J[Structured request: intent, columns, filters]
+    J --> V[Validate against the real columns]
+    V --> A[Pandas computes the result]
+    A --> O[Answer + table + chart + export]
+```
+
+- **The LLM never calculates.** It returns a small JSON request (intent, column, group, filter). Every count, average and rate is computed by Pandas on the uploaded data.
+- **Questions that need no interpretation skip the LLM.** Row counts, column counts and missing-value summaries are answered directly.
+- **Column names come from the dataset.** Nothing is hard-coded to one schema, so the same app works on HR, sales, network-traffic or any other tabular data.
+- **Unclear questions get a clarifying question** instead of a guess.
+
+## Team
+
+Built as a team project by:
+
+- **Ateeb Mohammad** – Analysis engine, dataset-agnostic refactor, test suite & CI, cloud deployment
+- **Nihaal Mohammad** – Streamlit UI and visualizations
 
 ## Current Capabilities
 
